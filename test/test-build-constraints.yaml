@@ -15,6 +15,11 @@ github-users:
   bar:
     - demo
 
+skipped-module-clash-checks:
+  "Control.Monad":
+    - foo
+    - bar
+
 package-flags:
   foo:
     demo: true

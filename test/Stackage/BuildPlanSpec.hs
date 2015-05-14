@@ -1,5 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings, NoImplicitPrelude #-}
+{-# LANGUAGE ViewPatterns #-}
 module Stackage.BuildPlanSpec (spec) where
 
 import qualified Data.Map as Map
@@ -21,21 +22,30 @@ import           Test.Hspec
 spec :: Spec
 spec = do
     it "simple package set" $ check testBuildConstraints $ makePackageSet
-        [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])])
-        ,("bar", [0, 0, 0], [])]
+        [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], [])
+        ,("bar", [0, 0, 0], [], [])]
     it "bad version range on depdendency fails" $ badBuildPlan $ makePackageSet
-        [("foo", [0, 0, 0], [("bar", thisV [1, 1, 0])])
-        ,("bar", [0, 0, 0], [])]
+        [("foo", [0, 0, 0], [("bar", thisV [1, 1, 0])], [])
+        ,("bar", [0, 0, 0], [], [])]
     it "nonexistent package fails to check" $ badBuildPlan $ makePackageSet
-        [("foo", [0, 0, 0], [("nonexistent", thisV [0, 0, 0])])
-        ,("bar", [0, 0, 0], [])]
+        [("foo", [0, 0, 0], [("nonexistent", thisV [0, 0, 0])], [])
+        ,("bar", [0, 0, 0], [], [])]
     it "mutual cycles fail to check" $ badBuildPlan $ makePackageSet
-        [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])])
-        ,("bar", [0, 0, 0], [("foo", thisV [0, 0, 0])])]
+        [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], [])
+        ,("bar", [0, 0, 0], [("foo", thisV [0, 0, 0])], [])]
     it "nested cycles fail to check" $ badBuildPlan $ makePackageSet
-        [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])])
-        ,("bar", [0, 0, 0], [("mu", thisV [0, 0, 0])])
-        ,("mu", [0, 0, 0], [("foo", thisV [0, 0, 0])])]
+        [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], [])
+        ,("bar", [0, 0, 0], [("mu", thisV [0, 0, 0])], [])
+        ,("mu", [0, 0, 0], [("foo", thisV [0, 0, 0])], [])]
+    it "Fails on two modules exporting the same name" $ moduleClash $ makePackageSet
+       [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], ["Control.Monad"])
+       ,("bar", [0, 0, 0], [], ["Control.Monad"])]
+    it "Does not fail when the two modules exported are different" $ check testBuildConstraints  $ makePackageSet
+       [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], ["Control.Monad"])
+       ,("bar", [0, 0, 0], [], ["Control.Applicative"])]
+    it "Does not fail when the conflicting module is allowed by the file" $ check testBuildConstraints  $ makePackageSet
+       [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], ["Control.Monad"])
+       ,("bar", [0, 0, 0], [], ["Control.Monad"])]
     {- Shouldn't be testing this actually
     it "default package set checks ok" $
       check defaultBuildConstraints getLatestAllowedPlans
@@ -52,6 +62,18 @@ badBuildPlan m _ = do
             return ()
         Right () ->
             error "Expected bad build plan."
+
+-- | Checking should be considered a module clash
+moduleClash :: (BuildConstraints -> IO (Map PackageName PackagePlan))
+                         -> void
+                         -> IO ()
+moduleClash m _ = do
+    mu <- try (check testBuildConstraints m)
+    case mu of
+        Left (_ :: ModuleNameClash) ->
+            return ()
+        Right () ->
+            error "Expected module clash."
 
 -- | Check build plan with the given package set getter.
 check :: (Manager -> IO BuildConstraints)
@@ -71,8 +93,10 @@ check readPlanFile getPlans = withManager tlsManagerSettings $ \man -> do
         (name, lookup name (bpPackages bp')) `shouldBe`
         (name, lookup name (bpPackages bp))
     bpGithubUsers bp' `shouldBe` bpGithubUsers bp
-
+    let bpModules = fmap (sdModules . ppDesc) (bpPackages bp)
+        bpModules' = fmap (sdModules . ppDesc) (bpPackages bp')
     when (bp' /= bp) $ error "bp' /= bp"
+    when (bpModules' /= bpModules) $ error "bpModules' /= bpModules"
     bp2 <- updateBuildPlan plans bp
     when (dropVersionRanges bp2 /= dropVersionRanges bp) $ error "bp2 /= bp"
     checkBuildPlan bp
@@ -85,27 +109,27 @@ check readPlanFile getPlans = withManager tlsManagerSettings $ \man -> do
 
 -- | Make a package set from a convenient data structure.
 makePackageSet
-    :: [(String,[Int],[(String,VersionRange)])]
+    :: [(String,[Int],[(String,VersionRange)], [String])]
     -> BuildConstraints
     -> IO (Map PackageName PackagePlan)
 makePackageSet ps _ =
     return $
     M.fromList $
     map
-        (\(name,ver,deps) ->
-              ( PackageName name
-              , dummyPackage ver $
+        (\(name,ver,deps, S.fromList . fmap pack -> mods) ->
+            ( PackageName name
+            , dummyPackage mods ver $
                 M.fromList $
                 map
                     (\(dname,dver) ->
-                          ( PackageName dname
-                          , DepInfo {diComponents = S.fromList
-                                             [CompLibrary]
-                                    ,diRange = dver}))
+                        ( PackageName dname
+                        , DepInfo {diComponents = S.fromList
+                                      [CompLibrary]
+                                  ,diRange = dver}))
                     deps))
         ps
     where
-        dummyPackage v deps =
+        dummyPackage m v deps =
             PackagePlan
                 {ppVersion = Version v []
                 ,ppGithubPings = mempty
@@ -124,7 +148,7 @@ makePackageSet ps _ =
                         {sdPackages = deps
                         ,sdTools = mempty
                         ,sdProvidedExes = mempty
-                        ,sdModules = mempty}}
+                        ,sdModules = m}}
 
 -- | This exact version is required.
 thisV :: [Int] -> VersionRange

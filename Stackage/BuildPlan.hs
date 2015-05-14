@@ -1,13 +1,10 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveFoldable     #-}
-{-# LANGUAGE DeriveFunctor      #-}
-{-# LANGUAGE DeriveTraversable  #-}
 {-# LANGUAGE NoImplicitPrelude  #-}
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE RecordWildCards    #-}
 {-# LANGUAGE TupleSections      #-}
 {-# LANGUAGE TypeFamilies       #-}
 {-# LANGUAGE FlexibleContexts   #-}
+
 -- | Representation of a concrete build plan, and how to generate a new one
 -- based on constraints.
 module Stackage.BuildPlan

@@ -26,6 +26,8 @@ updateBuildConstraints BuildPlan {..} =
     bcSystemInfo = bpSystemInfo
     bcPackages = Map.keysSet bpPackages
     bcGithubUsers = bpGithubUsers
+    bcAllowedModuleClashes = Map.empty
+    -- FIXME This should carry over, but BuildPlan doesn't have the right field
 
     bcPackageConstraints name = PackageConstraints
         { pcVersionRange = addBumpRange (maybe anyVersion pcVersionRange moldPC)

@@ -10,6 +10,7 @@
 module Stackage.CheckBuildPlan
     ( checkBuildPlan
     , BadBuildPlan
+    , ModuleNameClash
     ) where
 
 import           Control.Monad.Writer.Strict (Writer, execWriter, tell)
@@ -23,13 +24,17 @@ import           Stackage.Prelude
 -- | Check the build plan for missing deps, wrong versions, etc.
 checkBuildPlan :: (MonadThrow m) => BuildPlan -> m ()
 checkBuildPlan BuildPlan {..}
-    | null errs' = return ()
+    | null errs' && null mods' = return ()
+    | null errs' = throwM mods
     | otherwise = throwM errs
   where
     allPackages = map (,mempty) (siCorePackages bpSystemInfo) ++
                   map (ppVersion &&& M.keys . M.filter libAndExe . sdPackages . ppDesc) bpPackages
-    errs@(BadBuildPlan errs') =
-        execWriter $ mapM_ (checkDeps allPackages) $ mapToList bpPackages
+    allModules = map (sdModules . ppDesc) bpPackages
+    (errs@(BadBuildPlan errs'), mods@(ModuleNameClash mods')) =
+        execWriter $ do
+           mapM_  (checkDeps allPackages) (mapToList bpPackages)
+           mapM_ (checkModules allModules) (mapToList bpPackages)
     -- Only looking at libraries and executables, benchmarks and tests
     -- are allowed to create cycles (e.g. test-framework depends on
     -- text, which uses test-framework in its test-suite).
@@ -42,27 +47,29 @@ checkBuildPlan BuildPlan {..}
 -- 3. Check for dependency cycles.
 checkDeps :: Map PackageName (Version,[PackageName])
           -> (PackageName, PackagePlan)
-          -> Writer BadBuildPlan ()
+          -> Writer PlanError ()
 checkDeps allPackages (user, pb) =
     mapM_ go $ mapToList $ sdPackages $ ppDesc pb
   where
     go (dep, diRange -> range) =
         case lookup dep allPackages of
-            Nothing -> tell $ BadBuildPlan $ singletonMap (dep, Nothing) errMap
+            Nothing -> tellFst $ BadBuildPlan $ singletonMap (dep, Nothing) errMap
             Just (version,deps)
                 | version `withinRange` range ->
                     occursCheck allPackages
                                 (\d v ->
-                                     tell $ BadBuildPlan $ singletonMap
+                                     tellFst $ BadBuildPlan $ singletonMap
                                      (d,v)
                                      errMap)
                                 dep
                                 deps
                                 []
-                | otherwise -> tell $ BadBuildPlan $ singletonMap
+                | otherwise -> tellFst $ BadBuildPlan $ singletonMap
                     (dep, Just version)
                     errMap
       where
+        tellFst :: BadBuildPlan -> Writer PlanError ()
+        tellFst a = tell $ (a, mempty)
         errMap = singletonMap pu range
         pu = PkgUser
             { puName = user
@@ -71,6 +78,20 @@ checkDeps allPackages (user, pb) =
             , puGithubPings = ppGithubPings pb
             }
 
+-- | Check for conflicting module names
+checkModules :: Map PackageName (Set Text)
+             -> (PackageName, PackagePlan)
+             -> Writer PlanError ()
+checkModules allModules (pname, sdModules . ppDesc -> mods) =
+    mapM_ go mods
+  where
+    go :: Text -> Writer PlanError ()
+    go m = if m `elem` concat (toList (M.filterWithKey (\k _ -> k /= pname) allModules))
+           then tellSnd $ ModuleNameClash $ singletonMap pname mods
+           else return mempty
+      where
+        tellSnd :: ModuleNameClash -> Writer PlanError ()
+        tellSnd b = tell (mempty,b)
 -- | Check whether the package(s) occurs within its own dependency
 -- tree.
 occursCheck
@@ -123,9 +144,12 @@ pkgUserShow2 PkgUser {..} = unwords
     $ (maybe "No maintainer" unMaintainer puMaintainer ++ ".")
     : map (cons '@') (setToList puGithubPings)
 
+type PlanError = (BadBuildPlan, ModuleNameClash)
+
 newtype BadBuildPlan =
     BadBuildPlan (Map (PackageName, Maybe Version) (Map PkgUser VersionRange))
     deriving Typeable
+
 instance Exception BadBuildPlan
 instance Show BadBuildPlan where
     show (BadBuildPlan errs) =
@@ -156,8 +180,18 @@ instance Show BadBuildPlan where
             , "). "
             , pkgUserShow2 pu
             ]
-
 instance Monoid BadBuildPlan where
     mempty = BadBuildPlan mempty
     mappend (BadBuildPlan x) (BadBuildPlan y) =
         BadBuildPlan $ unionWith (unionWith intersectVersionRanges) x y
+
+
+newtype ModuleNameClash =
+    ModuleNameClash (Map PackageName (Set Text))
+    deriving (Show, Typeable)
+
+instance Exception ModuleNameClash
+instance Monoid ModuleNameClash where
+   mempty = ModuleNameClash mempty
+   mappend (ModuleNameClash x) (ModuleNameClash y) =
+     ModuleNameClash $ union x y

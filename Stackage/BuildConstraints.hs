@@ -40,6 +40,8 @@ data BuildConstraints = BuildConstraints
 
     , bcGithubUsers        :: Map Text (Set Text)
     -- ^ map an account to set of pingees
+    , bcAllowedModuleClashes :: Map Text (Set Text)
+    -- ^ map from module names to packages that contain the same exported name
     }
 
 -- | Modify the version bounds with the given Dependencies
@@ -110,6 +112,7 @@ data ConstraintFile = ConstraintFile
     , cfPackages                :: Map Maintainer (Vector Dependency)
     , cfGithubUsers             :: Map Text (Set Text)
     , cfSkippedLibProfiling     :: Set PackageName
+    , cfSkippedModuleClashes    :: Map Text (Set Text)
     , cfGhcMajorVersion         :: Maybe (Int, Int)
     }
 
@@ -125,6 +128,7 @@ instance FromJSON ConstraintFile where
                   >>= mapM (mapM toDep)
                     . Map.mapKeysWith const Maintainer
         cfGithubUsers <- o .: "github-users"
+        cfSkippedModuleClashes <- o .: "skipped-module-clash-checks"
         cfGhcMajorVersion <- o .:? "ghc-major-version" >>= mapM parseMajorVersion
         return ConstraintFile {..}
       where
@@ -186,3 +190,4 @@ toBC ConstraintFile {..} = do
         pcFlagOverrides = fromMaybe mempty $ lookup name cfPackageFlags
 
     bcGithubUsers = cfGithubUsers
+    bcAllowedModuleClashes = cfSkippedModuleClashes
