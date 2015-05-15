@@ -9,7 +9,7 @@
 -- | Confirm that a build plan has a consistent set of dependencies.
 module Stackage.CheckBuildPlan
     ( checkBuildPlan
-    , BadBuildPlan
+    , FailedDependencyCheck
     , ModuleNameClash
     ) where
 
@@ -24,14 +24,15 @@ import           Stackage.Prelude
 -- | Check the build plan for missing deps, wrong versions, etc.
 checkBuildPlan :: (MonadThrow m) => BuildPlan -> m ()
 checkBuildPlan BuildPlan {..}
-    | null errs' && null mods' = return ()
+    | null mods' && null errs' = return ()
     | null errs' = throwM mods
     | otherwise = throwM errs
   where
     allPackages = map (,mempty) (siCorePackages bpSystemInfo) ++
                   map (ppVersion &&& M.keys . M.filter libAndExe . sdPackages . ppDesc) bpPackages
     allModules = map (sdModules . ppDesc) bpPackages
-    (errs@(BadBuildPlan errs'), mods@(ModuleNameClash mods')) =
+    (BadBuildPlan (errs@(FailedDependencyCheck errs')) 
+                  (mods@(ModuleNameClash mods'))) =
         execWriter $ do
            mapM_  (checkDeps allPackages) (mapToList bpPackages)
            mapM_ (checkModules allModules) (mapToList bpPackages)
@@ -47,29 +48,29 @@ checkBuildPlan BuildPlan {..}
 -- 3. Check for dependency cycles.
 checkDeps :: Map PackageName (Version,[PackageName])
           -> (PackageName, PackagePlan)
-          -> Writer PlanError ()
+          -> Writer BadBuildPlan ()
 checkDeps allPackages (user, pb) =
     mapM_ go $ mapToList $ sdPackages $ ppDesc pb
   where
     go (dep, diRange -> range) =
         case lookup dep allPackages of
-            Nothing -> tellFst $ BadBuildPlan $ singletonMap (dep, Nothing) errMap
+            Nothing -> tellFst $ FailedDependencyCheck $ singletonMap (dep, Nothing) errMap
             Just (version,deps)
                 | version `withinRange` range ->
                     occursCheck allPackages
                                 (\d v ->
-                                     tellFst $ BadBuildPlan $ singletonMap
+                                     tellFst $ FailedDependencyCheck $ singletonMap
                                      (d,v)
                                      errMap)
                                 dep
                                 deps
                                 []
-                | otherwise -> tellFst $ BadBuildPlan $ singletonMap
+                | otherwise -> tellFst $ FailedDependencyCheck $ singletonMap
                     (dep, Just version)
                     errMap
       where
-        tellFst :: BadBuildPlan -> Writer PlanError ()
-        tellFst a = tell $ (a, mempty)
+        tellFst :: FailedDependencyCheck -> Writer BadBuildPlan ()
+        tellFst a = tell $ BadBuildPlan a mempty
         errMap = singletonMap pu range
         pu = PkgUser
             { puName = user
@@ -81,17 +82,17 @@ checkDeps allPackages (user, pb) =
 -- | Check for conflicting module names
 checkModules :: Map PackageName (Set Text)
              -> (PackageName, PackagePlan)
-             -> Writer PlanError ()
+             -> Writer BadBuildPlan ()
 checkModules allModules (pname, sdModules . ppDesc -> mods) =
     mapM_ go mods
   where
-    go :: Text -> Writer PlanError ()
+    go :: Text -> Writer BadBuildPlan ()
     go m = if m `elem` concat (toList (M.filterWithKey (\k _ -> k /= pname) allModules))
            then tellSnd $ ModuleNameClash $ singletonMap pname mods
            else return mempty
       where
-        tellSnd :: ModuleNameClash -> Writer PlanError ()
-        tellSnd b = tell (mempty,b)
+        tellSnd :: ModuleNameClash -> Writer BadBuildPlan ()
+        tellSnd b = tell $ BadBuildPlan mempty b
 -- | Check whether the package(s) occurs within its own dependency
 -- tree.
 occursCheck
@@ -144,15 +145,19 @@ pkgUserShow2 PkgUser {..} = unwords
     $ (maybe "No maintainer" unMaintainer puMaintainer ++ ".")
     : map (cons '@') (setToList puGithubPings)
 
-type PlanError = (BadBuildPlan, ModuleNameClash)
+data BadBuildPlan = BadBuildPlan FailedDependencyCheck ModuleNameClash
 
-newtype BadBuildPlan =
-    BadBuildPlan (Map (PackageName, Maybe Version) (Map PkgUser VersionRange))
+instance Monoid BadBuildPlan where
+   mempty = BadBuildPlan mempty mempty
+   BadBuildPlan x y `mappend` BadBuildPlan u v = BadBuildPlan (x `mappend` u) (y `mappend` v)
+
+newtype FailedDependencyCheck =
+    FailedDependencyCheck (Map (PackageName, Maybe Version) (Map PkgUser VersionRange))
     deriving Typeable
 
-instance Exception BadBuildPlan
-instance Show BadBuildPlan where
-    show (BadBuildPlan errs) =
+instance Exception FailedDependencyCheck
+instance Show FailedDependencyCheck where
+    show (FailedDependencyCheck errs) =
         unpack $ concatMap go $ mapToList errs
       where
         go ((dep, mdepVer), users) = unlines
@@ -180,10 +185,10 @@ instance Show BadBuildPlan where
             , "). "
             , pkgUserShow2 pu
             ]
-instance Monoid BadBuildPlan where
-    mempty = BadBuildPlan mempty
-    mappend (BadBuildPlan x) (BadBuildPlan y) =
-        BadBuildPlan $ unionWith (unionWith intersectVersionRanges) x y
+instance Monoid FailedDependencyCheck where
+    mempty = FailedDependencyCheck mempty
+    mappend (FailedDependencyCheck x) (FailedDependencyCheck y) =
+        FailedDependencyCheck $ unionWith (unionWith intersectVersionRanges) x y
 
 
 newtype ModuleNameClash =

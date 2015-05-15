@@ -24,16 +24,16 @@ spec = do
     it "simple package set" $ check testBuildConstraints $ makePackageSet
         [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], [])
         ,("bar", [0, 0, 0], [], [])]
-    it "bad version range on depdendency fails" $ badBuildPlan $ makePackageSet
+    it "bad version range on depdendency fails" $ badDependencies $ makePackageSet
         [("foo", [0, 0, 0], [("bar", thisV [1, 1, 0])], [])
         ,("bar", [0, 0, 0], [], [])]
-    it "nonexistent package fails to check" $ badBuildPlan $ makePackageSet
+    it "nonexistent package fails to check" $ badDependencies $ makePackageSet
         [("foo", [0, 0, 0], [("nonexistent", thisV [0, 0, 0])], [])
         ,("bar", [0, 0, 0], [], [])]
-    it "mutual cycles fail to check" $ badBuildPlan $ makePackageSet
+    it "mutual cycles fail to check" $ badDependencies $ makePackageSet
         [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], [])
         ,("bar", [0, 0, 0], [("foo", thisV [0, 0, 0])], [])]
-    it "nested cycles fail to check" $ badBuildPlan $ makePackageSet
+    it "nested cycles fail to check" $ badDependencies $ makePackageSet
         [("foo", [0, 0, 0], [("bar", thisV [0, 0, 0])], [])
         ,("bar", [0, 0, 0], [("mu", thisV [0, 0, 0])], [])
         ,("mu", [0, 0, 0], [("foo", thisV [0, 0, 0])], [])]
@@ -51,14 +51,14 @@ spec = do
       check defaultBuildConstraints getLatestAllowedPlans
     -}
 
--- | Checking should be considered a bad build plan.
-badBuildPlan :: (BuildConstraints -> IO (Map PackageName PackagePlan))
+-- | Checking should be considered a dependency issue
+badDependencies :: (BuildConstraints -> IO (Map PackageName PackagePlan))
              -> void
              -> IO ()
-badBuildPlan m _ = do
+badDependencies m _ = do
     mu <- try (check testBuildConstraints m)
     case mu of
-        Left (_ :: BadBuildPlan) ->
+        Left (_ :: FailedDependencyCheck) ->
             return ()
         Right () ->
             error "Expected bad build plan."
