@@ -1,5 +1,5 @@
 name:                stackage-curator
-version:             0.8.1
+version:             0.9.0
 synopsis:            Tools for curating Stackage bundles
 description:         Please see <http://www.stackage.org/package/stackage-curator> for a description and documentation.
 homepage:            https://github.com/fpco/stackage
@@ -34,6 +34,8 @@ library
                        Stackage.Upload
                        Stackage.PerformBuild
                        Stackage.CompleteBuild
+                       Stackage.Curator.UploadDocs
+                       Stackage.Curator.UploadIndex
   build-depends:       base >= 4 && < 5
                      , containers
                      , Cabal >= 1.14
@@ -49,7 +51,7 @@ library
                      , utf8-string
 
                      , conduit-extra
-                     , classy-prelude-conduit
+                     , classy-prelude-conduit < 0.12
                      , text
                      , system-fileio
                      , system-filepath
@@ -67,10 +69,25 @@ library
                      , async
                      , streaming-commons >= 0.1.7.1
                      , semigroups
-                     , xml-conduit
+                     , xml-conduit < 1.3
                      , conduit
-                     , stackage-types
-                     , monad-unlift
+                     , stackage-types >= 1.0.1
+                     , monad-unlift >= 0.1.1
+
+                     , blaze-html
+                     , html-conduit
+                     , mime-types
+                     , amazonka
+                     , amazonka-s3
+                     , amazonka-core
+                     , xml-types
+                     , base16-bytestring
+                     , byteable
+                     , cryptohash
+                     , cryptohash-conduit
+                     , resourcet
+                     , stackage-metadata >= 0.3
+                     , stackage-install >= 0.1.1
 
 executable stackage-curator
   default-language:    Haskell2010

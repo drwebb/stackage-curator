@@ -25,6 +25,7 @@ import Network.HTTP.Client (withManager)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import qualified Data.Text as T
 import System.IO (hSetBuffering, stdout, BufferMode (LineBuffering))
+import Stackage.Curator.UploadIndex
 
 main :: IO ()
 main = do
@@ -51,21 +52,32 @@ main = do
             (fetch <$> planFile)
         addCommand "make-bundle" "Run a complete build and generate an upload bundle" id
             makeBundle'
+        addCommand "check-target-available" "Is the given target available to be used?" id
+            (checkTargetAvailable <$> target)
         addCommand "upload" "Upload a bundle to Stackage Server" id
             (upload <$> bundleFile <*> stackageServer)
         addCommand "hackage-distro" "Update the Hackage distro list" id
             (hackageDistro <$> planFile <*> target)
         addCommand "upload-github" "Upload a plan to the relevant Github repo" id
-            (uploadGithub <$> planFile <*> target)
+            (uploadGithub <$> planFile <*> docmapFile <*> target)
         addCommand "install" "Install a snapshot from an existing build plan" id
             (installBuild <$> installFlags)
         addCommand "stats" "Print statistics on a build plan" id
             (printStats <$> planFile)
         addCommand "diff" "Show the high-level differences between two build plans" id
             (diffPlans <$> planFileArg <*> planFileArg)
+        addCommand "upload-index" "Upload the 00-index.tar.gz file to S3" id
+            (uploadIndex
+                <$> planFile
+                <*> target
+                <*> pure (T.pack "haddock.stackage.org")
+                <*> pure (T.pack "package-index/"))
+        addCommand "upload-docs" "Upload documentation to an S3 bucket" id
+            (uploadDocs' <$> target <*> bundleFile)
 
     makeBundle' = makeBundle
         <$> planFile
+        <*> docmapFile
         <*> bundleFile
         <*> target
         <*> jobs
@@ -196,24 +208,29 @@ main = do
         s <- str
         let onErr = fail $ "Invalid target: " ++ s
         case s of
-            "nightly" -> return TargetNightly
+            'n':'i':'g':'h':'t':'l':'y':'-':t ->
+                maybe onErr (return . TargetNightly) (readMay t)
             'l':'t':'s':'-':t1 -> maybe onErr return $ do
                 Right (i, t2) <- Just $ decimal $ T.pack t1
                 if T.null t2
-                    then return $ TargetMajor i
+                    then return $ TargetLts i 0
                     else do
                         t3 <- T.stripPrefix (T.pack ".") t2
                         Right (j, t4) <- Just $ decimal t3
                         guard $ T.null t4
-                        if j == 0
-                            then return $ TargetMajor i
-                            else return $ TargetMinor i j
+                        return $ TargetLts i j
             _ -> onErr
 
     planFile = fmap decodeString $ strOption
          ( metavar "YAML-FILE"
         ++ long "plan-file"
         ++ help "YAML file containing a build plan"
+         )
+
+    docmapFile = fmap decodeString $ strOption
+         ( metavar "YAML-FILE"
+        ++ long "docmap-file"
+        ++ help "YAML file containing the docmap (list of all generated Haddock modules)"
          )
 
     planFileArg = fmap decodeString $ strArgument

@@ -16,6 +16,8 @@ module Stackage.CompleteBuild
     , upload
     , hackageDistro
     , uploadGithub
+    , uploadDocs'
+    , checkTargetAvailable
     ) where
 
 import System.Directory (getAppUserDataDirectory)
@@ -45,6 +47,7 @@ import System.IO                 (BufferMode (LineBuffering), hSetBuffering)
 import Control.Monad.Trans.Unlift (askRunBase, MonadBaseUnlift)
 import Data.Function (fix)
 import Control.Concurrent.Async (Concurrently (..))
+import Stackage.Curator.UploadDocs (uploadDocs)
 
 -- | Flags passed in from the command line.
 data BuildFlags = BuildFlags
@@ -89,11 +92,11 @@ nightlyPlanFile :: Text -- ^ day
                 -> FilePath
 nightlyPlanFile day = fpFromText ("nightly-" ++ day) <.> "yaml"
 
-nightlySettings :: Text -- ^ day
+nightlySettings :: Day
                 -> BuildFlags
                 -> BuildPlan
                 -> Settings
-nightlySettings day bf plan' = Settings
+nightlySettings day' bf plan' = Settings
     { planFile = fromMaybe (nightlyPlanFile day) (bfPlanFile bf)
     , buildDir = fpFromText $ "builds/nightly"
     , logDir = fpFromText $ "logs/stackage-nightly-" ++ day
@@ -107,13 +110,14 @@ nightlySettings day bf plan' = Settings
     , plan = plan'
     , postBuild = return ()
     , distroName = "Stackage"
-    , snapshotType = STNightly
+    , snapshotType = STNightly2 day'
     , bundleDest = fromMaybe
         (fpFromText $ "stackage-nightly-" ++ day ++ ".bundle")
         (bfBundleDest bf)
     }
   where
     slug' = "nightly-" ++ day
+    day = tshow day'
 
 parseGoal :: MonadThrow m
           => BumpType
@@ -139,77 +143,6 @@ parseGoal bumpType t =
 data ParseGoalFailure = ParseGoalFailure Text
     deriving (Show, Typeable)
 instance Exception ParseGoalFailure
-
-getSettings :: Manager -> BuildFlags -> BuildType -> Maybe FilePath -> IO Settings
-getSettings man bf Nightly mplanFile = do
-    day <- tshow . utctDay <$> getCurrentTime
-    plan' <- case mplanFile of
-        Nothing -> do
-            bc <- defaultBuildConstraints man
-            pkgs <- getLatestAllowedPlans bc
-            newBuildPlan pkgs bc
-        Just file -> decodeFileEither (fpToString file) >>= either throwIO return
-    return $ nightlySettings day bf plan'
-getSettings man bf (LTS bumpType goal) Nothing = do
-    matchesGoal <- parseGoal bumpType goal
-    Option mlts <- fmap (fmap getMax) $ runResourceT
-        $ sourceDirectory "."
-       $= concatMapC (parseLTSVer . filename)
-       $= filterC matchesGoal
-       $$ foldMapC (Option . Just . Max)
-
-    (new, plan') <- case bumpType of
-        Major -> do
-            let new =
-                    case mlts of
-                        Nothing -> LTSVer 0 0
-                        Just (LTSVer x _) -> LTSVer (x + 1) 0
-            bc <- defaultBuildConstraints man
-            pkgs <- getLatestAllowedPlans bc
-            plan' <- newBuildPlan pkgs bc
-            return (new, plan')
-        Minor -> do
-            old <- maybe (error "No LTS plans found in current directory") return mlts
-            oldplan <- decodeFileEither (fpToString $ renderLTSVer old)
-                   >>= either throwM return
-            let new = incrLTSVer old
-            let bc = updateBuildConstraints oldplan
-            pkgs <- getLatestAllowedPlans bc
-            plan' <- newBuildPlan pkgs bc
-            return (new, plan')
-
-    let newfile = renderLTSVer new
-
-    return Settings
-        { planFile = fromMaybe newfile (bfPlanFile bf)
-        , buildDir = fpFromText $ "builds/lts"
-        , logDir = fpFromText $ "logs/stackage-lts-" ++ tshow new
-        , title = \ghcVer -> concat
-            [ "LTS Haskell "
-            , tshow new
-            , ", GHC "
-            , ghcVer
-            ]
-        , slug = "lts-" ++ tshow new
-        , plan = plan'
-        , postBuild = do
-            let git args = withCheckedProcess
-                    (proc "git" args) $ \ClosedStream Inherited Inherited ->
-                        return ()
-            putStrLn "Committing new LTS file to Git"
-            git ["add", fpToString newfile]
-            git ["commit", "-m", "Added new LTS release: " ++ show new]
-            when (bfGitPush bf) $ do
-                putStrLn "Pushing to Git repository"
-                git ["push"]
-        , distroName = "LTSHaskell"
-        , snapshotType =
-            case new of
-                LTSVer x y -> STLTS x y
-        , bundleDest = fromMaybe
-            (fpFromText $ "stackage-lts-" ++ tshow new ++ ".bundle")
-            (bfBundleDest bf)
-        }
 
 data LTSVer = LTSVer !Int !Int
     deriving (Eq, Ord)
@@ -239,7 +172,7 @@ createPlan target dest constraints = withManager tlsManagerSettings $ \man -> do
     putStrLn $ "Creating plan for: " ++ tshow target
     bc <-
         case target of
-            TargetMinor x y -> do
+            TargetLts x y | y /= 0 -> do
                 let url = concat
                         [ "https://raw.githubusercontent.com/fpco/lts-haskell/master/lts-"
                         , show x
@@ -426,48 +359,17 @@ hackageDistro planFile target = withManager tlsManagerSettings $ \man -> do
   where
     distroName =
         case target of
-            TargetNightly -> "Stackage"
-            TargetMajor _ -> "LTSHaskell"
-            TargetMinor _ _ -> "LTSHaskell"
+            TargetNightly _ -> "Stackage"
+            TargetLts _ _ -> "LTSHaskell"
 
-uploadGithub
-    :: FilePath -- ^ plan file
-    -> Target
-    -> IO ()
-uploadGithub planFile target = do
-    let repoUrl =
-            case target of
-                TargetNightly -> "git@github.com:fpco/stackage-nightly"
-                _ -> "git@github.com:fpco/lts-haskell"
-
-    root <- fpFromString <$> getAppUserDataDirectory "stackage-curator"
-
-    now <- getCurrentTime
+checkoutRepo :: Target -> IO ([String] -> IO (), FilePath, FilePath)
+checkoutRepo target = do
+    root <- fmap (</> "curator") $ fpFromString <$> getAppUserDataDirectory "stackage"
 
     let repoDir =
             case target of
-                TargetNightly -> root </> "stackage-nightly"
-                _ -> root </> "lts-haskell"
-
-        destFP =
-            case target of
-                TargetNightly -> repoDir </> (fpFromString $ concat
-                    [ "nightly-"
-                    , show $ utctDay now
-                    , ".yaml"
-                    ])
-                TargetMajor x -> repoDir </> (fpFromString $ concat
-                    [ "lts-"
-                    , show x
-                    , ".0.yaml"
-                    ])
-                TargetMinor x y -> repoDir </> (fpFromString $ concat
-                    [ "lts-"
-                    , show x
-                    , "."
-                    , show y
-                    , ".yaml"
-                    ])
+                TargetNightly _ -> root </> "stackage-nightly"
+                TargetLts _ _ -> root </> "lts-haskell"
 
         runIn wdir cmd args = do
             putStrLn $ concat
@@ -482,6 +384,24 @@ uploadGithub planFile target = do
 
         git = runIn repoDir "git"
 
+        name =
+            case target of
+                TargetNightly day -> fpFromString $ concat
+                    [ "nightly-"
+                    , show day
+                    , ".yaml"
+                    ]
+                TargetLts x y -> fpFromString $ concat
+                    [ "lts-"
+                    , show x
+                    , "."
+                    , show y
+                    , ".yaml"
+                    ]
+
+        destFPPlan = repoDir </> name
+        destFPDocmap = repoDir </> "docs" </> name
+
     exists <- isDirectory repoDir
     if exists
         then do
@@ -491,9 +411,33 @@ uploadGithub planFile target = do
             createTree $ parent repoDir
             runIn "." "git" ["clone", repoUrl, fpToString repoDir]
 
-    runResourceT $ sourceFile planFile $$ (sinkFile destFP :: Sink ByteString (ResourceT IO) ())
-    git ["add", fpToString destFP]
-    git ["commit", "-m", "Checking in " ++ fpToString (filename destFP)]
+    whenM (liftIO $ isFile destFPPlan)
+        $ error $ "File already exists: " ++ fpToString destFPPlan
+    whenM (liftIO $ isFile destFPDocmap)
+        $ error $ "File already exists: " ++ fpToString destFPDocmap
+
+    return (git, destFPPlan, destFPDocmap)
+  where
+    repoUrl =
+        case target of
+            TargetNightly _ -> "git@github.com:fpco/stackage-nightly"
+            TargetLts _ _ -> "git@github.com:fpco/lts-haskell"
+
+uploadGithub
+    :: FilePath -- ^ plan file
+    -> FilePath -- ^ docmap file
+    -> Target
+    -> IO ()
+uploadGithub planFile docmapFile target = do
+    (git, destFPPlan, destFPDocmap) <- checkoutRepo target
+
+    createTree $ parent destFPDocmap
+    runResourceT $ do
+        sourceFile planFile $$ (sinkFile destFPPlan :: Sink ByteString (ResourceT IO) ())
+        sourceFile docmapFile $$ (sinkFile destFPDocmap :: Sink ByteString (ResourceT IO) ())
+
+    git ["add", fpToString destFPPlan, fpToString destFPDocmap]
+    git ["commit", "-m", "Checking in " ++ fpToString (basename destFPPlan)]
     git ["push", "origin", "HEAD:master"]
 
 upload
@@ -512,8 +456,29 @@ upload bundleFile server = withManager tlsManagerSettings $ \man -> do
         }
     putStrLn $ "New snapshot available at: " ++ res
 
+uploadDocs' :: Target
+            -> FilePath -- ^ bundle file
+            -> IO ()
+uploadDocs' target bundleFile = do
+    name <-
+        case target of
+            TargetNightly day -> return $ "nightly-" ++ tshow day
+            TargetLts x y -> return $ concat ["lts-", tshow x, ".", tshow y]
+    uploadDocs
+        (installDest target </> "doc")
+        bundleFile
+        name
+        "haddock.stackage.org"
+
+installDest :: Target -> FilePath
+installDest target =
+    case target of
+        TargetNightly _ -> "builds/nightly"
+        TargetLts x _ -> fpFromText $ "builds/lts-" ++ tshow x
+
 makeBundle
     :: FilePath -- ^ plan file
+    -> FilePath -- ^ docmap file
     -> FilePath -- ^ bundle file
     -> Target
     -> Maybe Int -- ^ jobs
@@ -526,24 +491,19 @@ makeBundle
     -> Bool -- ^ allow-newer?
     -> IO ()
 makeBundle
-  planFile bundleFile target mjobs skipTests skipHaddocks skipHoogle
+  planFile docmapFile bundleFile target mjobs skipTests skipHaddocks skipHoogle
   enableLibraryProfiling enableExecutableDynamic verbose allowNewer
         = do
     plan <- decodeFileEither (fpToString planFile) >>= either throwM return
     jobs <- maybe getNumCapabilities return mjobs
     let pb = PerformBuild
             { pbPlan = plan
-            , pbInstallDest =
-                case target of
-                    TargetNightly -> "builds/nightly"
-                    TargetMajor x -> fpFromText $ "builds/lts-" ++ tshow x
-                    TargetMinor x _ -> fpFromText $ "builds/lts-" ++ tshow x
+            , pbInstallDest = installDest target
             , pbLog = hPut stdout
             , pbLogDir =
                 case target of
-                    TargetNightly -> "logs/nightly"
-                    TargetMajor x -> fpFromText $ "logs/lts-" ++ tshow x
-                    TargetMinor x _ -> fpFromText $ "logs/lts-" ++ tshow x
+                    TargetNightly _ -> "logs/nightly"
+                    TargetLts x _ -> fpFromText $ "logs/lts-" ++ tshow x
             , pbJobs = jobs
             , pbGlobalInstall = False
             , pbEnableTests = not skipTests
@@ -563,11 +523,11 @@ makeBundle
         { cb2Plan = plan
         , cb2Type =
             case target of
-                TargetNightly -> STNightly
-                TargetMajor x -> STLTS x 0
-                TargetMinor x y -> STLTS x y
+                TargetNightly day -> STNightly2 day
+                TargetLts x y -> STLTS x y
         , cb2DocsDir = pbDocDir pb
         , cb2Dest = bundleFile
+        , cb2DocmapFile = docmapFile
         }
 
 fetch :: FilePath -> IO ()
@@ -633,3 +593,7 @@ parMapM_ cnt f xs0 = do
         workers 1 = Concurrently worker
         workers i = Concurrently worker *> workers (i - 1)
     liftBase $ runConcurrently $ workers cnt
+
+-- | Check if the given target is already used in the Github repos
+checkTargetAvailable :: Target -> IO ()
+checkTargetAvailable = void . checkoutRepo
