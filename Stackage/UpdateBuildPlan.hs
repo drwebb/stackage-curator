@@ -26,7 +26,7 @@ updateBuildConstraints BuildPlan {..} =
     bcSystemInfo = bpSystemInfo
     bcPackages = Map.keysSet bpPackages
     bcGithubUsers = bpGithubUsers
-    bcAllowedModuleClashes = Map.empty
+    bcAllowedModuleClashes = bpAllowedModuleClashes
     -- FIXME This should carry over, but BuildPlan doesn't have the right field
 
     bcPackageConstraints name = PackageConstraints

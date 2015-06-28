@@ -21,6 +21,7 @@ module Stackage.BuildConstraints
 import           Control.Monad.Writer.Strict (execWriter, tell)
 import           Data.Aeson
 import qualified Data.Map                    as Map
+import qualified Data.Set                    as Set
 import           Data.Yaml                   (decodeEither', decodeFileEither)
 import           Distribution.Package        (Dependency (..))
 import           Distribution.System         (Arch, OS)
@@ -40,7 +41,7 @@ data BuildConstraints = BuildConstraints
 
     , bcGithubUsers        :: Map Text (Set Text)
     -- ^ map an account to set of pingees
-    , bcAllowedModuleClashes :: Map Text (Set Text)
+    , bcAllowedModuleClashes :: Maybe (Map Text (Set PackageName))
     -- ^ map from module names to packages that contain the same exported name
     }
 
@@ -112,7 +113,7 @@ data ConstraintFile = ConstraintFile
     , cfPackages                :: Map Maintainer (Vector Dependency)
     , cfGithubUsers             :: Map Text (Set Text)
     , cfSkippedLibProfiling     :: Set PackageName
-    , cfSkippedModuleClashes    :: Map Text (Set Text)
+    , cfSkippedModuleClashes    :: Maybe (Map Text (Set Text))
     , cfGhcMajorVersion         :: Maybe (Int, Int)
     }
 
@@ -190,4 +191,4 @@ toBC ConstraintFile {..} = do
         pcFlagOverrides = fromMaybe mempty $ lookup name cfPackageFlags
 
     bcGithubUsers = cfGithubUsers
-    bcAllowedModuleClashes = cfSkippedModuleClashes
+    bcAllowedModuleClashes = (fmap (Set.map (PackageName . unpack))) <$> cfSkippedModuleClashes

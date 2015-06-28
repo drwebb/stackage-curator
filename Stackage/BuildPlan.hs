@@ -46,6 +46,7 @@ newBuildPlan packagesOrig bc@BuildConstraints {..} = liftIO $ do
         , bpTools = tools
         , bpPackages = packages
         , bpGithubUsers = bcGithubUsers
+        , bpAllowedModuleClashes = bcAllowedModuleClashes
         }
   where
     SystemInfo {..} = bcSystemInfo
